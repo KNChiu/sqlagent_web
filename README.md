@@ -1,3 +1,16 @@
+# SQL Agent Web Application
+A FastAPI web application that leverages a Large Language Model (LLM) to interact with a SQL database using natural language queries. The application supports both direct querying and Retrieval-Augmented Generation (RAG) for enhanced responses.
+
+## Demo
+### Asking simple questions:
+![Web page](images\Demo.png)
+
+### Step-by-step reasoning:
+![Reasoning timeline](images\Step.png)
+
+### Follow-up questions:
+![Follow-up questions](images\Followup.png)
+
 ## Project Structure
 
 ```
