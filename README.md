@@ -3,13 +3,13 @@ A FastAPI web application that leverages a Large Language Model (LLM) to interac
 
 ## Demo
 ### Asking simple questions:
-![Web page](images\Demo.png)
+![Web page](images/Demo.png)
 
 ### Step-by-step reasoning:
-![Reasoning timeline](images\Step.png)
+![Reasoning timeline](images/Step.png)
 
 ### Follow-up questions:
-![Follow-up questions](images\Followup.png)
+![Follow-up questions](images/Followup.png)
 
 ## Project Structure
 
