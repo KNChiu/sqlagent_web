@@ -60,7 +60,7 @@ class SQLAgentService:
         self,
         db_uri: str = None,
         model: str = None,
-        dialect: str = "SQLite",
+        dialect: str = None,
         top_k: int = None,
         rag_top_k: int = None
     ):
@@ -69,14 +69,14 @@ class SQLAgentService:
         Args:
             db_uri: Database connection URI
             model: LLM model identifier
-            dialect: SQL dialect name
+            dialect: SQL dialect name (auto-detected from db_uri if not provided)
             top_k: Default result limit for SQL queries
             rag_top_k: Number of relevant tables to retrieve via RAG (max 5)
         """
         # Use environment variables from settings if not provided
         self.db_uri = db_uri or settings.db_uri
         self.model = model or settings.model_name
-        self.dialect = dialect
+        self.dialect = dialect or settings.dialect
         self.top_k = top_k if top_k is not None else settings.top_k
         self.rag_top_k = rag_top_k if rag_top_k is not None else settings.rag_top_k
 

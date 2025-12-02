@@ -26,6 +26,30 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @property
+    def dialect(self) -> str:
+        """Auto-detect SQL dialect from database URI
+
+        Returns:
+            SQL dialect name for use in Agent prompts (e.g., SQLite, T-SQL, PostgreSQL)
+        """
+        uri_lower = self.db_uri.lower()
+
+        # Map database URI prefixes to SQL dialect names
+        if uri_lower.startswith("sqlite"):
+            return "SQLite"
+        elif uri_lower.startswith("postgresql") or uri_lower.startswith("postgres"):
+            return "PostgreSQL"
+        elif uri_lower.startswith("mysql"):
+            return "MySQL"
+        elif uri_lower.startswith("mssql"):
+            return "T-SQL"
+        elif uri_lower.startswith("oracle"):
+            return "Oracle"
+        else:
+            # Fallback to generic SQL if dialect cannot be determined
+            return "SQL"
+
 
 # Global configuration instance
 settings = Settings()
