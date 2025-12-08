@@ -84,7 +84,7 @@
             </div>
             <div>
                 <h1 class="font-bold text-slate-800 leading-tight">Text2SQL Dashboard</h1>
-                <p class="text-xs text-slate-500">Powered by Claude Sonnet 4.5</p>
+                <p id="model-display" class="text-xs text-slate-500">Loading model info...</p>
             </div>
         </div>
         <div class="flex items-center gap-3">
@@ -249,7 +249,7 @@ SELECT * FROM waiting_for_input;</code></pre>
         document.addEventListener('DOMContentLoaded', () => {
             // 初始化 Highlight.js
             hljs.highlightAll();
-            
+
             // 綁定 Quick Query 按鈕
             document.querySelectorAll('.quick-query').forEach(btn => {
                 btn.addEventListener('click', (e) => {
@@ -259,7 +259,32 @@ SELECT * FROM waiting_for_input;</code></pre>
             });
 
             updateButtonStates(null); // 初始禁用按鈕
+
+            // Fetch and display current model info
+            fetchModelInfo();
         });
+
+        // --- Fetch Model Info ---
+        async function fetchModelInfo() {
+            try {
+                const response = await fetch('/api/model_info');
+                if (!response.ok) {
+                    throw new Error(`Failed to fetch model info: ${response.status}`);
+                }
+                const data = await response.json();
+                const modelDisplay = document.getElementById('model-display');
+                if (modelDisplay) {
+                    modelDisplay.textContent = `${data.display_name}`;
+                }
+            } catch (error) {
+                console.error('Error fetching model info:', error);
+                // Fallback to generic text if API fails
+                const modelDisplay = document.getElementById('model-display');
+                if (modelDisplay) {
+                    modelDisplay.textContent = 'Powered by AI';
+                }
+            }
+        }
 
         // --- Toast 通知系統 ---
         function showToast(message, type = 'info') {

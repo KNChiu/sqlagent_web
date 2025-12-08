@@ -1,5 +1,7 @@
 """Configuration management using Pydantic Settings"""
 
+from typing import Optional
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -11,6 +13,10 @@ class Settings(BaseSettings):
 
     # LLM model configuration
     model_name: str = "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0"
+
+    # LLM authentication parameters (optional)
+    model_base_url: Optional[str] = None  # Custom API endpoint
+    model_api_key: Optional[str] = None  # API key for authentication
 
     # Query result limits
     top_k: int = 5

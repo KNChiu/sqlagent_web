@@ -4,16 +4,18 @@ Initialize schema descriptions using LLM.
 
 This script:
 1. Connects to database and extracts all table schemas
-2. Uses Claude via AWS Bedrock to generate semantic descriptions for each table
+2. Uses LLM (supports AWS Bedrock, OpenAI, Anthropic, and OpenAI-compatible APIs) to generate semantic descriptions for each table
 3. Outputs schema_descriptions.json for RAG indexing
 
 Usage:
     python scripts/init_schema.py
 
 Configuration:
-    Reads from .env file:
+    Reads from .env file via app.config.Settings:
     - DB_URI: Database connection URI (default: sqlite:///./Chinook.db)
-    - MODEL_NAME: LLM model identifier (default: bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0)
+    - MODEL_NAME: LLM model identifier (e.g., 'bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0', 'openai:gpt-4', 'openai:custom-model')
+    - MODEL_BASE_URL: Custom API endpoint (optional, for OpenAI-compatible APIs)
+    - MODEL_API_KEY: API key for authentication (optional, for OpenAI/Anthropic/custom APIs)
     - SCHEMA_OUTPUT_PATH: Output JSON path (default: ./data/schema_descriptions.json)
 """
 
@@ -23,11 +25,18 @@ from pathlib import Path
 from typing import List, Dict, Any
 
 from dotenv import load_dotenv
-from langchain_aws import ChatBedrockConverse
+from langchain.chat_models import init_chat_model
 from sqlalchemy import create_engine, inspect
 
 # Load environment variables from .env file
 load_dotenv()
+
+# Import settings after loading .env
+import sys
+from pathlib import Path
+# Add parent directory to sys.path to import app module
+sys.path.insert(0, str(Path(__file__).parent.parent))
+from app.config import settings
 
 
 def get_table_names(db_uri: str) -> List[str]:
@@ -84,8 +93,8 @@ def get_table_schema(db_uri: str, table_name: str) -> Dict[str, Any]:
     }
 
 
-def generate_table_description(llm: ChatBedrockConverse, schema: Dict[str, Any]) -> str:
-    """Use Claude to generate semantic description for a table."""
+def generate_table_description(llm, schema: Dict[str, Any]) -> str:
+    """Use LLM to generate semantic description for a table."""
     table_name = schema["name"]
     columns = [col["name"] for col in schema["columns"]]
     foreign_keys = schema["foreign_keys"]
@@ -146,17 +155,6 @@ def parse_llm_response(response: str) -> Dict[str, Any]:
     return result
 
 
-def extract_model_id_from_name(model_name: str) -> str:
-    """Extract AWS Bedrock model ID from model name.
-
-    Converts 'bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0'
-    to 'us.anthropic.claude-sonnet-4-5-20250929-v1:0'
-    """
-    if model_name.startswith("bedrock:"):
-        return model_name.replace("bedrock:", "")
-    return model_name
-
-
 def load_existing_schema(output_path: str) -> Dict[str, Any]:
     """Load existing schema file if exists, otherwise return empty structure."""
     output_file = Path(output_path)
@@ -188,17 +186,14 @@ def save_schema_incremental(output_path: str, schema_data: Dict[str, Any]) -> No
 
 def main():
     """Main execution flow with incremental processing and error recovery."""
-    # Load configuration from environment variables
-    db_uri = os.getenv("DB_URI", "sqlite:///./Chinook.db")
+    # Load configuration from settings (which reads from .env)
+    db_uri = settings.db_uri
     output_path = os.getenv("SCHEMA_OUTPUT_PATH", "./data/schema_descriptions.json")
-    model_name = os.getenv("MODEL_NAME", "bedrock:us.anthropic.claude-sonnet-4-5-20250929-v1:0")
-
-    # Extract model ID
-    model_id = extract_model_id_from_name(model_name)
+    model_name = settings.model_name
 
     print("🔍 Initializing schema extraction...")
     print(f"  📁 Database URI: {db_uri}")
-    print(f"  🤖 Model: {model_id}")
+    print(f"  🤖 Model: {model_name}")
     print(f"  📄 Output: {output_path}")
 
     # Load existing schema (if any)
@@ -209,8 +204,18 @@ def main():
         print(f"📋 Found existing schema with {len(processed_tables)} tables already processed")
         print(f"  Already processed: {', '.join(sorted(processed_tables))}")
 
-    # Initialize LLM
-    llm = ChatBedrockConverse(model=model_id, temperature=0)
+    # Initialize LLM with same logic as agent_service.py
+    llm_kwargs = {"temperature": 0}
+
+    if settings.model_base_url:
+        llm_kwargs["base_url"] = settings.model_base_url
+        print(f"  🌐 Using custom base_url: {settings.model_base_url}")
+
+    if settings.model_api_key:
+        llm_kwargs["api_key"] = settings.model_api_key
+        print("  🔑 Using custom API key from MODEL_API_KEY")
+
+    llm = init_chat_model(model=model_name, **llm_kwargs)
 
     # Get all tables
     tables = get_table_names(db_uri)

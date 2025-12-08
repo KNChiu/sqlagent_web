@@ -15,6 +15,7 @@ import time
 import logging
 
 from .agent_service import SQLAgentService
+from .config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -125,3 +126,14 @@ async def query_database_stream(
 async def read_index():
     """Serve the frontend HTML page"""
     return FileResponse("index.html")
+
+
+@router.get("/api/model_info")
+async def get_model_info():
+    """Get current model information for display purposes"""
+    model_name = settings.model_name
+
+    return {
+        "model_name": model_name,
+        "display_name": model_name  # Use original model name directly
+    }

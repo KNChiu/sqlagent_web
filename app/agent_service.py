@@ -84,7 +84,18 @@ class SQLAgentService:
         self.system_message = PROMPT_TEMPLATE.format(dialect=self.dialect, top_k=self.top_k)
 
         # Initialize LLM and database
-        self.llm = init_chat_model(model=self.model)
+        # Build kwargs for init_chat_model with optional authentication parameters
+        llm_kwargs = {}
+
+        if settings.model_base_url:
+            llm_kwargs["base_url"] = settings.model_base_url
+            logger.info(f"Using custom base_url: {settings.model_base_url}")
+
+        if settings.model_api_key:
+            llm_kwargs["api_key"] = settings.model_api_key
+            logger.info("Using custom API key from MODEL_API_KEY environment variable")
+
+        self.llm = init_chat_model(model=self.model, **llm_kwargs)
         self.db = SQLDatabase.from_uri(
             self.db_uri,
             view_support=True,
