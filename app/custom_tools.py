@@ -116,7 +116,7 @@ class QuerySQLDatabaseTool(BaseTool):
     args_schema: Type[BaseModel] = QuerySQLDatabaseInput
 
     db: SQLDatabase = Field(exclude=True)
-    max_results: int = Field(default=5, exclude=True)
+    query_limit: int = Field(default=5, exclude=True)
 
     class Config:
         arbitrary_types_allowed = True
@@ -144,15 +144,15 @@ class QuerySQLDatabaseTool(BaseTool):
                     logger.info("Query executed successfully (no results)")
                     return "Query executed successfully. No rows returned."
 
-                # Limit to max_results
-                limited_result = result[:self.max_results]
+                # Limit to query_limit
+                limited_result = result[:self.query_limit]
 
                 # Format as table
                 formatted_output = self._format_results(limited_result)
 
                 result_summary = f"Query returned {len(result)} row(s)"
-                if len(result) > self.max_results:
-                    result_summary += f" (showing first {self.max_results})"
+                if len(result) > self.query_limit:
+                    result_summary += f" (showing first {self.query_limit})"
 
                 logger.info(f"Query executed successfully ({len(result)} rows)")
                 return f"{result_summary}:\n\n{formatted_output}"
@@ -207,7 +207,8 @@ class QuerySQLDatabaseTool(BaseTool):
 def create_rag_sql_tools(
     rag_service: SchemaRAGService,
     db: SQLDatabase,
-    top_k: int = 5
+    rag_top_k: int = 5,
+    query_limit: int = 5
 ) -> list:
     """
     Create a list of RAG-enabled SQL tools for the agent.
@@ -215,7 +216,8 @@ def create_rag_sql_tools(
     Args:
         rag_service: Initialized SchemaRAGService instance
         db: SQLDatabase instance
-        top_k: Number of relevant tables to retrieve (default: 5, max recommended)
+        rag_top_k: Number of relevant tables to retrieve via RAG (default: 5)
+        query_limit: Maximum number of rows to return from SQL queries (default: 5)
 
     Returns:
         List of LangChain tools
@@ -223,12 +225,12 @@ def create_rag_sql_tools(
     tools = [
         RAGSchemaInfoTool(
             rag_service=rag_service,
-            top_k=top_k,
+            top_k=rag_top_k,
             verbose_output=True
         ),
         QuerySQLDatabaseTool(
             db=db,
-            max_results=5
+            query_limit=query_limit
         )
     ]
 

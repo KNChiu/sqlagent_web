@@ -17,4 +17,5 @@ dependencies = [
     "pydantic-settings>=2.0.0",
     "python-dotenv>=1.2.1",
     "uvicorn>=0.38.0",
+    "deepagents>=0.3.0",
 ]

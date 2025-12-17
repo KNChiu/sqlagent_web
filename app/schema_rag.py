@@ -137,23 +137,28 @@ class SchemaRAGService:
         Returns:
             Formatted schema information string
         """
-        # Check cache first
-        uncached_tables = [t for t in table_names if t not in self._schema_cache]
+        if not table_names:
+            return ""
 
+        # Separate cached and uncached tables
+        cached_results = []
+        uncached_tables = []
+
+        for table in table_names:
+            if table in self._schema_cache:
+                cached_results.append(self._schema_cache[table])
+            else:
+                uncached_tables.append(table)
+
+        # Fetch uncached tables individually for proper caching
         if uncached_tables:
-            # Fetch from database and cache
-            schema_info = self.db.get_table_info(uncached_tables)
-
-            # Simple caching - store the full result
             for table in uncached_tables:
-                # Extract this table's schema from the full result
-                # (This is a simple approach; could be more sophisticated)
+                schema_info = self.db.get_table_info([table])
                 self._schema_cache[table] = schema_info
+                cached_results.append(schema_info)
 
-        # Retrieve full schema for requested tables
-        if table_names:
-            return self.db.get_table_info(table_names)
-        return ""
+        # Combine all schemas
+        return "\n\n".join(cached_results)
 
     def get_enhanced_schema_info(self, table_names: List[str]) -> str:
         """
@@ -187,11 +192,3 @@ class SchemaRAGService:
             return enhanced
 
         return sql_schema
-
-    def get_all_table_names(self) -> List[str]:
-        """Get list of all available table names."""
-        return list(self.schema_metadata.keys())
-
-    def clear_cache(self):
-        """Clear the schema cache."""
-        self._schema_cache.clear()

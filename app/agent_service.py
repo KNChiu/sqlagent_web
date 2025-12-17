@@ -13,44 +13,18 @@ import logging
 
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain.chat_models import init_chat_model
-from langchain.agents import create_agent
+from deepagents import create_deep_agent
 
 from .parsers import extract_tool_calls_data, parse_chart_data
 from .debug_utils import print_agent_reasoning, detect_phase_from_message
 from .schema_rag import SchemaRAGService
 from .custom_tools import create_rag_sql_tools
+from .middleware import SafetyMiddleware
 from .config import settings
+from .prompts import build_main_system_message
+from .subagents import create_subagents
 
 logger = logging.getLogger(__name__)
-
-
-# System prompt template for the SQL Agent (RAG-optimized)
-PROMPT_TEMPLATE = """system
-You are an agent designed to interact with a SQL database using RAG-enhanced schema retrieval.
-Given an input question, create a syntactically correct {dialect} query to run, then look at the results of the query and return the answer.
-Unless the user specifies a specific number of examples they wish to obtain, always limit your query to at most {top_k} results.
-However, if the user explicitly requests a different number (e.g., "show me 10 rows", "give me 20 records"), you MUST respect their request and override the default limit.
-You can order the results by a relevant column to return the most interesting examples in the database.
-Never query for all the columns from a specific table, only ask for the relevant columns given the question.
-You have access to tools for interacting with the database.
-Only use the below tools. Only use the information returned by the below tools to construct your final answer.
-You MUST double check your query before executing it. If you get an error while executing a query, rewrite the query and try again.
-
-DO NOT make any DML statements (INSERT, UPDATE, DELETE, DROP etc.) to the database.
-
-IMPORTANT: Use the sql_db_schema_rag tool FIRST to get relevant table schemas based on your query understanding.
-The RAG tool will automatically find the most relevant tables - you do NOT need to list all tables first.
-Simply describe what data you need in natural language, and the tool will return the appropriate schemas.
-
-IMPORTANT: When the user asks follow-up questions (e.g., "show me more", "what about Canada?", "give me 10 records instead"),
-you MUST refer to the conversation history to understand the context. Pay attention to previous queries and results in this conversation.
-
-EFFICIENCY RULES (CRITICAL):
-1. Once you execute a query and get valid results, STOP immediately and provide your answer.
-2. Do NOT rewrite queries just to change output format, column names, or data presentation.
-3. Do NOT execute the same query multiple times with minor variations.
-4. If you get data back from sql_db_query, that means the query was successful - answer the user's question directly.
-5. Only retry if you get an ERROR message. Valid results (even if formatted differently than expected) should be used immediately."""
 
 
 class SQLAgentService:
@@ -61,7 +35,7 @@ class SQLAgentService:
         db_uri: str = None,
         model: str = None,
         dialect: str = None,
-        top_k: int = None,
+        query_limit: int = None,
         rag_top_k: int = None
     ):
         """Initialize SQL Agent with LLM, database, and RAG service
@@ -70,32 +44,32 @@ class SQLAgentService:
             db_uri: Database connection URI
             model: LLM model identifier
             dialect: SQL dialect name (auto-detected from db_uri if not provided)
-            top_k: Default result limit for SQL queries
+            query_limit: Default result limit for SQL queries
             rag_top_k: Number of relevant tables to retrieve via RAG (max 5)
         """
         # Use environment variables from settings if not provided
         self.db_uri = db_uri or settings.db_uri
         self.model = model or settings.model_name
         self.dialect = dialect or settings.dialect
-        self.top_k = top_k if top_k is not None else settings.top_k
+        self.query_limit = query_limit if query_limit is not None else settings.query_limit
         self.rag_top_k = rag_top_k if rag_top_k is not None else settings.rag_top_k
 
         # Initialize system prompt
-        self.system_message = PROMPT_TEMPLATE.format(dialect=self.dialect, top_k=self.top_k)
+        self.system_message = build_main_system_message(self.dialect, self.query_limit)
 
-        # Initialize LLM and database
-        # Build kwargs for init_chat_model with optional authentication parameters
+        # Initialize LLM with optional authentication parameters
         llm_kwargs = {}
-
         if settings.model_base_url:
             llm_kwargs["base_url"] = settings.model_base_url
             logger.info(f"Using custom base_url: {settings.model_base_url}")
-
         if settings.model_api_key:
             llm_kwargs["api_key"] = settings.model_api_key
             logger.info("Using custom API key from MODEL_API_KEY environment variable")
 
         self.llm = init_chat_model(model=self.model, **llm_kwargs)
+        logger.info(f"LLM initialized: {self.model}")
+
+        # Initialize database
         self.db = SQLDatabase.from_uri(
             self.db_uri,
             view_support=True,
@@ -105,18 +79,50 @@ class SQLAgentService:
 
         # Initialize RAG service (reuse db instance to avoid duplicate connections)
         logger.info("Initializing Schema RAG Service...")
-        self.rag_service = SchemaRAGService(db=self.db, db_uri=self.db_uri)
-
-        # Create RAG-enabled tools
-        self.tools = create_rag_sql_tools(
-            rag_service=self.rag_service,
+        self.rag_service = SchemaRAGService(
             db=self.db,
-            top_k=self.rag_top_k
+            db_uri=self.db_uri,
+            index_path=settings.index_path,
+            schema_json_path=settings.schema_json_path
         )
 
-        # Create agent with RAG tools
-        self.agent = create_agent(self.llm, self.tools, system_prompt=self.system_message)
-        logger.info(f"SQL Agent initialized successfully (model: {self.model}, tools: {len(self.tools)})")
+        # Initialize middleware and tools
+        logger.info("Initializing DeepAgent middleware and tools...")
+        # Create RAG-enhanced SQL tools directly (no need for middleware wrapper)
+        rag_tools = create_rag_sql_tools(
+            rag_service=self.rag_service,
+            db=self.db,
+            rag_top_k=self.rag_top_k,
+            query_limit=self.query_limit
+        )
+        safety_middleware = SafetyMiddleware(query_limit=self.query_limit)
+
+        # Create subagents if enabled
+        subagents = []
+        if settings.enable_subagents:
+            logger.info("Configuring subagents...")
+            subagents = create_subagents(
+                rag_service=self.rag_service,
+                rag_top_k=self.rag_top_k,
+                subagent_model=settings.subagent_model
+            )
+        else:
+            logger.info("Subagents disabled - running in simple mode")
+
+        # Create DeepAgent with middleware and subagents
+        logger.info(f"Creating DeepAgent with middleware and {len(subagents)} subagent(s)...")
+        self.agent = create_deep_agent(
+            model=self.llm,  # Pass initialized chat model object
+            tools=rag_tools,  # Provide tools directly
+            middleware=[
+                safety_middleware,
+                # TodoListMiddleware is included by default
+                # FilesystemMiddleware is included by default
+            ],
+            subagents=subagents,  # Stage 2: enable subagents
+            system_prompt=self.system_message
+        )
+        logger.info(f"DeepAgent initialized successfully (model: {self.model}, subagents: {len(subagents)})")
 
     def process_query(
         self,
@@ -165,7 +171,7 @@ class SQLAgentService:
             logger.error("No response from agent")
             raise ValueError("No response from agent")
 
-        logger.info(f"Agent execution completed in {agent_duration:.2f}s")
+        logger.info(f"Agent execution completed in {agent_duration:.2f}s ({len(messages)} messages)")
 
         # Display agent reasoning process
         print_agent_reasoning(messages, query)
@@ -177,38 +183,49 @@ class SQLAgentService:
         # Extract SQL query and structured results
         sql_query, query_results = extract_tool_calls_data(messages)
 
-        # Display data extraction results
-        self._print_extraction_results(sql_query, query_results)
+        if sql_query:
+            logger.info(f"Extracted SQL: {sql_query[:150]}...")
 
         # Parse chart data
         chart_data = None
         if query_results:
             chart_data = parse_chart_data(query_results, sql_query or "")
-
-        # Fallback: try to parse from response text
-        if not chart_data and response_text:
+        elif response_text:
             chart_data = parse_chart_data(response_text, sql_query or "")
-
-        # Log data extraction results
-        logger.info(
-            f"Data extraction completed "
-            f"(SQL: {'Yes' if sql_query else 'No'}, "
-            f"Results: {len(query_results) if isinstance(query_results, list) else 'N/A'} rows, "
-            f"Chart: {'Yes' if chart_data else 'No'})"
-        )
 
         # Prepare raw data for table view
         raw_data = None
         if query_results and isinstance(query_results, list):
             raw_data = query_results
 
-        # Calculate performance metrics
+        # Calculate performance metrics and execution statistics
         request_end_time = time.time()
         total_duration = request_end_time - request_start_time
         data_processing_duration = total_duration - agent_duration
 
-        # Display performance summary
-        self._print_performance_summary(agent_duration, data_processing_duration, total_duration)
+        # Count subagent calls and tool calls for monitoring
+        subagent_calls = 0
+        tool_calls = 0
+
+        for msg in messages:
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tool_call in msg.tool_calls:
+                    tool_name = tool_call.get('name', '')
+                    tool_calls += 1
+
+                    if 'task' in tool_name.lower():
+                        subagent_calls += 1
+                        subagent_name = tool_call.get('args', {}).get('name', 'unknown')
+                        logger.info(f"Subagent delegation: {subagent_name}")
+
+        # Display performance summary with new metrics
+        self._print_performance_summary(
+            agent_duration,
+            data_processing_duration,
+            total_duration,
+            subagent_calls,
+            tool_calls
+        )
 
         return {
             "message": response_text,
@@ -218,7 +235,10 @@ class SQLAgentService:
             "performance": {
                 "agent_time": agent_duration,
                 "data_processing_time": data_processing_duration,
-                "total_time": total_duration
+                "total_time": total_duration,
+                "subagent_calls": subagent_calls,
+                "tool_calls": tool_calls,
+                "success": True
             }
         }
 
@@ -250,6 +270,9 @@ class SQLAgentService:
         # Add current query
         input_messages.append(("user", query))
 
+        # Log streaming start
+        logger.info(f"Starting STREAMING query: '{query}'")
+
         # Send initial status
         yield {"type": "start", "message": "🚀 啟動 Agent..."}
         await asyncio.sleep(0)
@@ -257,49 +280,65 @@ class SQLAgentService:
         # Track execution phases
         current_phase = None
         all_messages = []
+        stream_start_time = time.time()
 
         # Stream agent execution with recursion limit
-        for chunk in self.agent.stream(
+        # DeepAgent uses astream() with stream_mode="values"
+        async for chunk in self.agent.astream(
             {"messages": input_messages},
-            stream_mode="updates",
+            stream_mode="values",
             config={"recursion_limit": settings.recursion_limit}
         ):
-            for node_name, data in chunk.items():
-                messages = data.get("messages", [])
-                if not messages:
-                    continue
+            # DeepAgent returns chunks with "messages" key directly
+            if "messages" in chunk:
+                messages = chunk["messages"]
 
                 # Accumulate all messages
-                all_messages.extend(messages)
+                all_messages = messages  # Update full message list
 
-                latest_msg = messages[-1]
+                if messages:
+                    latest_msg = messages[-1]
 
-                # Detect phase from message
-                phase_info = detect_phase_from_message(latest_msg)
+                    # Detect phase from message
+                    phase_info = detect_phase_from_message(latest_msg)
 
-                # Send phase transition event if phase changed
-                if phase_info["phase"] != current_phase:
-                    current_phase = phase_info["phase"]
-                    event_data = {
-                        "type": "phase",
+                    # Send phase transition event if phase changed
+                    if phase_info["phase"] != current_phase:
+                        current_phase = phase_info["phase"]
+                        event_data = {
+                            "type": "phase",
+                            "phase": phase_info["phase"],
+                            "icon": phase_info["icon"],
+                            "message": phase_info["message"]
+                        }
+                        yield event_data
+                        await asyncio.sleep(0)
+
+                    # Send step detail event
+                    step_event = {
+                        "type": "step",
                         "phase": phase_info["phase"],
-                        "icon": phase_info["icon"],
-                        "message": phase_info["message"]
+                        "details": phase_info["details"]
                     }
-                    yield event_data
+                    yield step_event
                     await asyncio.sleep(0)
 
-                # Send step detail event
-                step_event = {
-                    "type": "step",
-                    "phase": phase_info["phase"],
-                    "details": phase_info["details"]
-                }
-                yield step_event
-                await asyncio.sleep(0)
+        # Calculate streaming duration
+        stream_duration = time.time() - stream_start_time
 
         # Extract final results
         sql_query, query_results = extract_tool_calls_data(all_messages)
+
+        # Count tool calls and subagent calls for streaming
+        tool_calls = 0
+        subagent_calls = 0
+        for msg in all_messages:
+            if hasattr(msg, 'tool_calls') and msg.tool_calls:
+                for tool_call in msg.tool_calls:
+                    tool_name = tool_call.get('name', '')
+                    tool_calls += 1
+                    if 'task' in tool_name.lower():
+                        subagent_calls += 1
 
         # Parse chart data
         chart_data = None
@@ -315,6 +354,10 @@ class SQLAgentService:
         final_message = all_messages[-1] if all_messages else None
         response_text = final_message.content if (final_message and hasattr(final_message, 'content')) else ""
 
+        # Log summary
+        rows = len(query_results) if isinstance(query_results, list) else 0
+        logger.info(f"Streaming completed in {stream_duration:.2f}s - SQL: {bool(sql_query)}, Rows: {rows}, Tools: {tool_calls}, Subagents: {subagent_calls}")
+
         # Send completion event
         final_event = {
             "type": "complete",
@@ -325,53 +368,13 @@ class SQLAgentService:
         }
         yield final_event
 
-    def _print_extraction_results(self, sql_query: Optional[str], query_results: Any):
-        """Log data extraction results for debugging"""
-        logger.debug("=" * 60)
-        logger.debug("DATA EXTRACTION RESULTS")
-        logger.debug("=" * 60)
-
-        if sql_query:
-            logger.debug(f"SQL Query Extracted: {sql_query}")
-        else:
-            logger.debug("No SQL query found in agent messages")
-
-        if query_results:
-            logger.debug(f"Query Results Extracted - Data Type: {type(query_results).__name__}")
-
-            if isinstance(query_results, list):
-                logger.debug(f"Structure: List with {len(query_results)} item(s)")
-
-                if len(query_results) > 0:
-                    first_item = query_results[0]
-                    first_item_type = type(first_item).__name__
-                    logger.debug(f"Item Type: {first_item_type}")
-
-                    if isinstance(first_item, dict):
-                        columns = list(first_item.keys())
-                        logger.debug(f"Columns ({len(columns)}): {', '.join(columns)}")
-                        logger.debug(f"Sample Row: {first_item}")
-                    elif isinstance(first_item, tuple):
-                        logger.debug(f"Tuple Length: {len(first_item)}")
-                        logger.debug(f"Sample Row: {first_item}")
-                    else:
-                        logger.debug(f"Sample Item: {str(first_item)[:100]}")
-
-                    if len(query_results) > 1:
-                        logger.debug(f"... and {len(query_results) - 1} more row(s)")
-            else:
-                preview = str(query_results)[:200]
-                logger.debug(f"Preview: {preview}{'...' if len(str(query_results)) > 200 else ''}")
-        else:
-            logger.debug("No structured results found")
-
-        logger.debug("=" * 60)
-
-    def _print_performance_summary(self, agent_time: float, data_time: float, total_time: float):
+    def _print_performance_summary(
+        self,
+        agent_time: float,
+        data_time: float,
+        total_time: float,
+        subagent_calls: int = 0,
+        tool_calls: int = 0
+    ):
         """Log performance summary for debugging"""
-        logger.debug("=" * 60)
-        logger.debug("PERFORMANCE SUMMARY")
-        logger.debug(f"Agent Processing: {agent_time:.2f}s")
-        logger.debug(f"Data Processing:  {data_time:.2f}s")
-        logger.debug(f"Total Time:       {total_time:.2f}s")
-        logger.debug("=" * 60)
+        logger.info(f"Performance - Total: {total_time:.2f}s, Agent: {agent_time:.2f}s, Data: {data_time:.2f}s, Tools: {tool_calls}, Subagents: {subagent_calls}")

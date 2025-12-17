@@ -75,16 +75,3 @@ def setup_logging(log_level: str = "INFO") -> None:
     # Note: All third-party libraries inherit WARNING level from root logger
     # Only project modules (app.*) are explicitly set to INFO/DEBUG above
     logging.info("Logging system initialized successfully")
-
-
-def get_logger(name: str) -> logging.Logger:
-    """
-    Get a logger instance for a specific module.
-
-    Args:
-        name: Module name (usually __name__)
-
-    Returns:
-        Logger instance
-    """
-    return logging.getLogger(name)
