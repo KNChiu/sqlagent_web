@@ -96,6 +96,10 @@ class QuerySQLDatabaseInput(BaseModel):
         description="A detailed and correct SQL query to execute against the database. "
         "The query must be syntactically correct and reference only existing tables and columns."
     )
+    description: str = Field(
+        description="A brief one-line description of what this query does. "
+        "This will be displayed to users during query execution."
+    )
 
 
 class QuerySQLDatabaseTool(BaseTool):
@@ -124,11 +128,15 @@ class QuerySQLDatabaseTool(BaseTool):
     def _run(
         self,
         query: str,
+        description: str = "",
         run_manager: Optional[CallbackManagerForToolRun] = None
     ) -> str:
-        """Execute SQL query and return results."""
+        """Execute SQL query and return results as JSON for better data processing."""
         try:
-            logger.info(f"Executing SQL query: {query}")
+            if description:
+                logger.info(f"Executing SQL query: {description}")
+            else:
+                logger.info(f"Executing SQL query: {query[:100]}...")
 
             # Execute query and fetch all results
             result = self.db.run(query, fetch="all")
@@ -138,7 +146,7 @@ class QuerySQLDatabaseTool(BaseTool):
                 logger.info(f"Query executed successfully (result type: string)")
                 return result
 
-            # Format results as readable text
+            # Format results as JSON for structured data processing
             if isinstance(result, list):
                 if len(result) == 0:
                     logger.info("Query executed successfully (no results)")
@@ -147,15 +155,17 @@ class QuerySQLDatabaseTool(BaseTool):
                 # Limit to query_limit
                 limited_result = result[:self.query_limit]
 
-                # Format as table
-                formatted_output = self._format_results(limited_result)
+                # Convert to JSON format for better parsing
+                import json
+                json_output = json.dumps(limited_result, ensure_ascii=False, default=str)
 
                 result_summary = f"Query returned {len(result)} row(s)"
                 if len(result) > self.query_limit:
                     result_summary += f" (showing first {self.query_limit})"
 
-                logger.info(f"Query executed successfully ({len(result)} rows)")
-                return f"{result_summary}:\n\n{formatted_output}"
+                logger.info(f"Query executed successfully ({len(result)} rows, returning JSON)")
+                # Return JSON array directly for structured parsing
+                return json_output
 
             logger.info(f"Query executed successfully (result type: {type(result).__name__})")
             return str(result)

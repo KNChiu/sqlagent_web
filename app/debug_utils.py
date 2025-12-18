@@ -34,33 +34,49 @@ def detect_phase_from_message(message) -> dict:
             }
 
         elif 'schema' in tool_name:
+            # RAG schema tool uses 'query' parameter (natural language)
+            query = tool_args.get('query', '')
+
+            # Traditional schema tool uses 'table_names' parameter
             tables = tool_args.get('table_names', [])
-            # Handle both list and string types
-            if isinstance(tables, list):
-                table_str = ', '.join(tables) if tables else '資料表'
-            elif isinstance(tables, str):
-                table_str = tables
+
+            if query:
+                # RAG mode: show the natural language query
+                display_text = query[:60] + '...' if len(query) > 60 else query
+            elif tables:
+                # Traditional mode: show table names
+                if isinstance(tables, list):
+                    display_text = ', '.join(tables)
+                else:
+                    display_text = str(tables)
             else:
-                table_str = '資料表'
+                display_text = '資料表結構'
 
             return {
                 "phase": "schema_analysis",
                 "icon": "📋",
-                "message": f"正在分析資料表: {table_str}",
-                "details": {"tool": tool_name, "tables": tables}
+                "message": f"正在搜尋相關資料表: {display_text}",
+                "details": {"tool": tool_name, "query": query, "tables": tables}
             }
 
         elif 'sql_db_query' in tool_name:
             sql_query = tool_args.get('query', '')
-            sql_preview = sql_query[:80] + '...' if len(sql_query) > 80 else sql_query
+            description = tool_args.get('description', '')
+
+            # Use description if provided, otherwise show SQL preview
+            if description:
+                display_message = description
+            else:
+                display_message = sql_query[:80] + '...' if len(sql_query) > 80 else sql_query
+
             return {
                 "phase": "query_execution",
                 "icon": "⚡",
-                "message": "正在執行 SQL 查詢...",
+                "message": display_message,
                 "details": {
                     "tool": tool_name,
                     "sql": sql_query,
-                    "sql_preview": sql_preview
+                    "description": description
                 }
             }
 
@@ -112,8 +128,8 @@ def detect_phase_from_message(message) -> dict:
 
             return {
                 "phase": "processing_results",
-                "icon": "📊",
-                "message": f"查詢完成，處理 {row_count} 筆資料...",
+                "icon": "✓",
+                "message": f"查詢結果: {row_count} 筆資料",
                 "details": {"row_count": row_count, "content_type": type(content).__name__}
             }
 
@@ -128,11 +144,29 @@ def detect_phase_from_message(message) -> dict:
             }
 
         elif 'schema' in tool_name:
+            # Extract table names from content if available
+            content_str = str(content)
+            table_names = []
+
+            # Try to extract from "Found N relevant tables: table1, table2, ..."
+            match = re.search(r'Found (\d+) relevant tables?:\s*(.+?)(?:\n|$)', content_str)
+            if match:
+                table_count = match.group(1)
+                table_list = match.group(2).strip()
+                table_names = [t.strip() for t in table_list.split(',')]
+
+                return {
+                    "phase": "schema_analysis",
+                    "icon": "📋",
+                    "message": f"找到 {table_count} 個相關資料表: {', '.join(table_names[:5])}{'...' if len(table_names) > 5 else ''}",
+                    "details": {"table_count": int(table_count), "tables": table_names}
+                }
+
             return {
                 "phase": "schema_analysis",
                 "icon": "📋",
                 "message": "Schema 載入完成",
-                "details": {"content_length": len(str(content))}
+                "details": {"content_length": len(content_str)}
             }
 
     # Final answer generation (AIMessage with content, no tool calls)

@@ -10,6 +10,8 @@ from typing import List, Dict, Any, Optional
 import time
 import asyncio
 import logging
+import json
+import re
 
 from langchain_community.utilities.sql_database import SQLDatabase
 from langchain.chat_models import init_chat_model
@@ -124,6 +126,158 @@ class SQLAgentService:
         )
         logger.info(f"DeepAgent initialized successfully (model: {self.model}, subagents: {len(subagents)})")
 
+    def _enhance_data_with_llm(
+        self,
+        user_query: str,
+        sql_query: str,
+        query_results: List[Dict[str, Any]]
+    ) -> Optional[Dict[str, Any]]:
+        """Use LLM to analyze query results and recommend optimal chart configuration.
+
+        Args:
+            user_query: Original user question in natural language
+            sql_query: Executed SQL query
+            query_results: Query results as List[Dict]
+
+        Returns:
+            Chart.js compatible chart_data dict, or None if analysis fails
+        """
+        try:
+            # Step 1: Prepare sample data (first 3 rows to reduce token usage)
+            sample_size = min(3, len(query_results))
+            sample_data = query_results[:sample_size]
+            column_names = list(sample_data[0].keys()) if sample_data else []
+
+            # Step 2: Build LLM analysis prompt (embedded in function)
+            prompt = f"""You are a data visualization expert. Analyze the following query results and recommend the optimal chart configuration.
+
+User Question: "{user_query}"
+SQL Query: {sql_query}
+Columns: {', '.join(column_names)}
+Sample Data (first {sample_size} rows): {json.dumps(sample_data, ensure_ascii=False)}
+
+Task: Recommend chart configuration.
+
+Requirements:
+1. Chart type: "bar" (categorical), "line" (time series), "pie" (distribution), "table" (no numeric data)
+2. Select: label_column (X-axis), value_columns (Y-axis, can be multiple)
+3. Sort: sort_by, sort_order ("asc"/"desc")
+4. Insights: 1-2 sentences summary
+5. Confidence (0-1): Return < 0.5 if unsuitable for visualization
+
+Output JSON:
+{{
+  "chart_type": "bar",
+  "label_column": "Country",
+  "value_columns": ["Total"],
+  "sort_by": "Total",
+  "sort_order": "desc",
+  "insights": "USA has highest sales",
+  "confidence": 0.9
+}}
+
+CRITICAL: Return ONLY valid JSON."""
+
+            # Step 3: Call LLM (synchronous version)
+            logger.info("Starting LLM data analysis...")
+            response = self.llm.invoke([("user", prompt)])
+            response_text = response.content if hasattr(response, 'content') else str(response)
+
+            # Step 4: Parse JSON response (handle markdown code blocks)
+            json_match = re.search(r'```json\s*(\{.*?\})\s*```', response_text, re.DOTALL)
+            if json_match:
+                json_str = json_match.group(1)
+            else:
+                # Try direct JSON parsing
+                json_str = response_text.strip()
+
+            recommendation = json.loads(json_str)
+
+            # Step 5: Validate confidence
+            confidence = recommendation.get('confidence', 0)
+            if confidence < 0.5:
+                logger.warning(f"LLM confidence too low ({confidence}), using fallback")
+                return None
+
+            # Step 6: Build chart_data from recommendation
+            chart_type = recommendation['chart_type']
+            label_column = recommendation['label_column']
+            value_columns = recommendation['value_columns']
+            sort_by = recommendation.get('sort_by')
+            sort_order = recommendation.get('sort_order', 'desc')
+
+            # Sort data if specified
+            sorted_results = query_results
+            if sort_by and sort_by in query_results[0]:
+                reverse = (sort_order == 'desc')
+                sorted_results = sorted(
+                    query_results,
+                    key=lambda x: x.get(sort_by, 0),
+                    reverse=reverse
+                )
+
+            # Limit to 10 data points for chart clarity
+            sorted_results = sorted_results[:10]
+
+            # Extract labels
+            labels = [str(row.get(label_column, '')) for row in sorted_results]
+
+            # Extract values (support multiple datasets)
+            datasets = []
+            colors = [
+                'rgba(59, 130, 246, 0.5)',   # Blue
+                'rgba(16, 185, 129, 0.5)',   # Green
+                'rgba(249, 115, 22, 0.5)',   # Orange
+            ]
+
+            for idx, value_col in enumerate(value_columns):
+                values = []
+                for row in sorted_results:
+                    value = row.get(value_col)
+                    # Convert to float
+                    try:
+                        if isinstance(value, (int, float)):
+                            values.append(float(value))
+                        elif isinstance(value, str):
+                            # Remove currency symbols and convert
+                            clean_value = re.sub(r'[^\d.]', '', value)
+                            values.append(float(clean_value) if clean_value else 0)
+                        else:
+                            values.append(0)
+                    except (ValueError, TypeError):
+                        values.append(0)
+
+                color = colors[idx % len(colors)]
+                datasets.append({
+                    'label': value_col,
+                    'data': values,
+                    'backgroundColor': color,
+                    'borderColor': color.replace('0.5', '1'),
+                    'borderWidth': 2
+                })
+
+            # Build final chart_data
+            chart_data = {
+                'type': chart_type,
+                'data': {
+                    'labels': labels,
+                    'datasets': datasets
+                }
+            }
+
+            logger.info(f"LLM-enhanced chart created (type: {chart_type}, confidence: {confidence:.2f})")
+            return chart_data
+
+        except json.JSONDecodeError as e:
+            logger.warning(f"LLM response JSON parsing failed: {e}")
+            return None
+        except KeyError as e:
+            logger.warning(f"Missing required field in LLM response: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"LLM enhancement failed: {type(e).__name__}: {e}")
+            return None
+
     def process_query(
         self,
         query: str,
@@ -188,10 +342,23 @@ class SQLAgentService:
 
         # Parse chart data
         chart_data = None
-        if query_results:
-            chart_data = parse_chart_data(query_results, sql_query or "")
-        elif response_text:
-            chart_data = parse_chart_data(response_text, sql_query or "")
+
+        # Try LLM-enhanced data analysis first
+        if query_results and isinstance(query_results, list) and len(query_results) > 0:
+            try:
+                chart_data = self._enhance_data_with_llm(query, sql_query or "", query_results)
+                if chart_data:
+                    logger.info("Using LLM-enhanced chart")
+            except Exception as e:
+                logger.warning(f"LLM enhancement failed: {e}")
+
+        # Fallback to original parse_chart_data()
+        if not chart_data:
+            if query_results:
+                chart_data = parse_chart_data(query_results, sql_query or "")
+                logger.info("Using fallback chart parsing")
+            elif response_text:
+                chart_data = parse_chart_data(response_text, sql_query or "")
 
         # Prepare raw data for table view
         raw_data = None
@@ -282,6 +449,9 @@ class SQLAgentService:
         all_messages = []
         stream_start_time = time.time()
 
+        # Track tool call descriptions for result display
+        tool_descriptions = {}  # {tool_call_id: description}
+
         # Stream agent execution with recursion limit
         # DeepAgent uses astream() with stream_mode="values"
         async for chunk in self.agent.astream(
@@ -299,8 +469,24 @@ class SQLAgentService:
                 if messages:
                     latest_msg = messages[-1]
 
+                    # Track tool call descriptions (AIMessage with tool_calls)
+                    if hasattr(latest_msg, 'tool_calls') and latest_msg.tool_calls:
+                        for tool_call in latest_msg.tool_calls:
+                            tool_call_id = tool_call.get('id')
+                            tool_args = tool_call.get('args', {})
+                            description = tool_args.get('description', '')
+                            if tool_call_id and description:
+                                tool_descriptions[tool_call_id] = description
+
                     # Detect phase from message
                     phase_info = detect_phase_from_message(latest_msg)
+
+                    # Enhance result message with description (ToolMessage)
+                    if hasattr(latest_msg, 'tool_call_id') and latest_msg.tool_call_id in tool_descriptions:
+                        description = tool_descriptions[latest_msg.tool_call_id]
+                        if phase_info["phase"] == "processing_results":
+                            # Prepend description to result message
+                            phase_info["message"] = f"{description} → {phase_info['message']}"
 
                     # Send phase transition event if phase changed
                     if phase_info["phase"] != current_phase:
@@ -342,8 +528,20 @@ class SQLAgentService:
 
         # Parse chart data
         chart_data = None
-        if query_results:
+
+        # Try LLM-enhanced data analysis first
+        if query_results and isinstance(query_results, list) and len(query_results) > 0:
+            try:
+                chart_data = self._enhance_data_with_llm(query, sql_query or "", query_results)
+                if chart_data:
+                    logger.info("Using LLM-enhanced chart")
+            except Exception as e:
+                logger.warning(f"LLM enhancement failed: {e}")
+
+        # Fallback to original parse_chart_data()
+        if not chart_data and query_results:
             chart_data = parse_chart_data(query_results, sql_query or "")
+            logger.info("Using fallback chart parsing")
 
         # Prepare raw data
         raw_data = None
