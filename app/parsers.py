@@ -98,19 +98,19 @@ def extract_tool_calls_data(messages: List[Any]) -> tuple[Optional[str], Optiona
                 content = msg.content
 
                 # Log tool message content
-                logger.debug(f"Tool message content type: {type(content)}")
-                logger.debug(f"Content preview (first 500 chars): {str(content)[:500]}")
+                logger.info(f"Tool message content type: {type(content)}")
+                logger.info(f"Content preview (first 200 chars): {str(content)[:200]}")
 
                 # Try to parse structured data from tool response
                 try:
                     # Case 1: Content is already a list (structured data)
                     if isinstance(content, list):
                         query_results = content
-                        logger.debug("Parsed as list directly")
+                        logger.info(f"Parsed as list directly (length: {len(content)})")
                     # Case 2: Content is a tuple (convert to list)
                     elif isinstance(content, tuple):
                         query_results = list(content)
-                        logger.debug("Converted tuple to list")
+                        logger.info(f"Converted tuple to list (length: {len(content)})")
                     # Case 3: Content is JSON string
                     elif isinstance(content, str):
                         content_stripped = content.strip()
@@ -119,27 +119,27 @@ def extract_tool_calls_data(messages: List[Any]) -> tuple[Optional[str], Optiona
                         if content_stripped.startswith('['):
                             try:
                                 query_results = json.loads(content_stripped)
-                                logger.debug("Parsed as JSON")
+                                logger.info(f"Parsed as JSON (length: {len(query_results)}, first row type: {type(query_results[0]).__name__ if query_results else 'N/A'})")
                             except json.JSONDecodeError as e:
-                                logger.debug(f"JSON parse failed: {e}")
+                                logger.warning(f"JSON parse failed: {e}")
                                 # Try Python literal eval
                                 try:
                                     import ast
                                     query_results = ast.literal_eval(content_stripped)
-                                    logger.debug("Parsed as Python literal")
+                                    logger.info(f"Parsed as Python literal (length: {len(query_results)})")
                                 except Exception as e2:
-                                    logger.debug(f"Literal eval failed: {e2}")
+                                    logger.warning(f"Literal eval failed: {e2}")
                                     # Keep as string for text-based parsing
                                     if 'SELECT' not in content.upper():
                                         query_results = content
-                                        logger.debug("Keeping as string (fallback)")
+                                        logger.info("Keeping as string (fallback)")
                         else:
                             # Plain text format
                             if 'SELECT' not in content.upper():
                                 query_results = content
-                                logger.debug("Keeping as string (plain text)")
+                                logger.info("Keeping as string (plain text)")
                 except Exception as e:
-                    logger.debug(f"Unexpected error parsing tool results: {e}")
+                    logger.error(f"Unexpected error parsing tool results: {e}")
                     pass
 
     # Fallback: extract SQL from message content using regex
@@ -153,28 +153,14 @@ def extract_tool_calls_data(messages: List[Any]) -> tuple[Optional[str], Optiona
                     sql_query = re.sub(r'\s+', ' ', sql_query)
                     break
 
-    # Convert List[Tuple] to List[Dict] if needed
+    # Validation: Ensure query_results is List[Dict] format
+    # (QuerySQLDatabaseTool now returns JSON with dicts directly)
     if query_results and isinstance(query_results, list) and len(query_results) > 0:
         first_row = query_results[0]
-        # If the result is a list of tuples, convert to list of dicts
-        if isinstance(first_row, tuple):
-            # Extract column names from SQL query
-            column_names = extract_column_names_from_sql(sql_query)
-            if column_names and len(column_names) == len(first_row):
-                # Convert tuples to dicts
-                query_results = [
-                    dict(zip(column_names, row))
-                    for row in query_results
-                ]
-                logger.debug(f"Converted List[Tuple] to List[Dict] with columns: {column_names}")
-            else:
-                # Fallback: use generic column names
-                column_names = [f"Column_{i+1}" for i in range(len(first_row))]
-                query_results = [
-                    dict(zip(column_names, row))
-                    for row in query_results
-                ]
-                logger.debug(f"Using generic column names: {column_names}")
+        if not isinstance(first_row, dict):
+            logger.warning(f"Unexpected query result format: expected List[Dict], got List[{type(first_row).__name__}]")
+            # This shouldn't happen with the new QuerySQLDatabaseTool implementation
+            # but we keep this as a safeguard
 
     return sql_query, query_results
 

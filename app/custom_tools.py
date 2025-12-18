@@ -138,37 +138,45 @@ class QuerySQLDatabaseTool(BaseTool):
             else:
                 logger.info(f"Executing SQL query: {query[:100]}...")
 
-            # Execute query and fetch all results
-            result = self.db.run(query, fetch="all")
+            # Use SQLAlchemy engine directly to avoid string parsing issues
+            from sqlalchemy import text
+            import json
 
-            # Handle different result types
-            if isinstance(result, str):
-                logger.info(f"Query executed successfully (result type: string)")
-                return result
+            with self.db._engine.connect() as conn:
+                result_proxy = conn.execute(text(query))
+                rows = result_proxy.fetchall()
 
-            # Format results as JSON for structured data processing
-            if isinstance(result, list):
-                if len(result) == 0:
+                # Handle empty results
+                if not rows:
                     logger.info("Query executed successfully (no results)")
                     return "Query executed successfully. No rows returned."
 
-                # Limit to query_limit
-                limited_result = result[:self.query_limit]
+                # Get column names from result metadata
+                column_names = list(result_proxy.keys())
+                logger.info(f"Query returned {len(rows)} rows with columns: {column_names}")
 
-                # Convert to JSON format for better parsing
-                import json
-                json_output = json.dumps(limited_result, ensure_ascii=False, default=str)
+                # Convert rows to list of dicts with proper type handling
+                result_list = []
+                for row in rows[:self.query_limit]:
+                    row_dict = {}
+                    for col_name, value in zip(column_names, row):
+                        # Handle datetime objects - convert to ISO format string
+                        if hasattr(value, 'isoformat'):
+                            row_dict[col_name] = value.isoformat()
+                        # Handle None values
+                        elif value is None:
+                            row_dict[col_name] = None
+                        # Handle other types (int, float, str, bool, etc.)
+                        else:
+                            row_dict[col_name] = value
+                    result_list.append(row_dict)
 
-                result_summary = f"Query returned {len(result)} row(s)"
-                if len(result) > self.query_limit:
-                    result_summary += f" (showing first {self.query_limit})"
+                # Convert to JSON
+                json_output = json.dumps(result_list, ensure_ascii=False, default=str)
 
-                logger.info(f"Query executed successfully ({len(result)} rows, returning JSON)")
-                # Return JSON array directly for structured parsing
+                logger.info(f"Query executed successfully, returning {len(result_list)} rows as JSON (limited by query_limit: {self.query_limit})")
+                logger.debug(f"JSON output preview: {json_output[:200]}")
                 return json_output
-
-            logger.info(f"Query executed successfully (result type: {type(result).__name__})")
-            return str(result)
 
         except Exception as e:
             logger.error(f"Error executing SQL query: {str(e)}")
