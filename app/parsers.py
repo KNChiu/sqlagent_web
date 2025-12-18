@@ -14,153 +14,295 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-def extract_column_names_from_sql(sql: str) -> List[str]:
-    """Extract column names from SQL SELECT statement"""
-    if not sql:
-        return []
+# ============ SQL Extraction Functions ============
 
-    try:
-        # Remove comments and extra whitespace
-        sql_clean = re.sub(r'--.*$', '', sql, flags=re.MULTILINE)
-        sql_clean = re.sub(r'/\*.*?\*/', '', sql_clean, flags=re.DOTALL)
-        sql_clean = ' '.join(sql_clean.split())
+def extract_sql_from_tool_calls(messages: List[Any]) -> Optional[str]:
+    """Extract SQL query from AIMessage tool_calls
 
-        # Extract SELECT ... FROM portion
-        select_match = re.search(r'SELECT\s+(.*?)\s+FROM', sql_clean, re.IGNORECASE | re.DOTALL)
-        if not select_match:
-            return []
+    Searches for 'sql_db_query' tool calls in AIMessage objects
+    and extracts the 'query' argument.
 
-        select_clause = select_match.group(1).strip()
+    Args:
+        messages: List of agent messages (AIMessage, ToolMessage, etc.)
 
-        # Split by comma (but not commas inside functions)
-        columns = []
-        paren_depth = 0
-        current_col = []
-
-        for char in select_clause:
-            if char == '(':
-                paren_depth += 1
-                current_col.append(char)
-            elif char == ')':
-                paren_depth -= 1
-                current_col.append(char)
-            elif char == ',' and paren_depth == 0:
-                columns.append(''.join(current_col).strip())
-                current_col = []
-            else:
-                current_col.append(char)
-
-        # Add last column
-        if current_col:
-            columns.append(''.join(current_col).strip())
-
-        # Extract alias names (AS alias_name) or use full expression
-        column_names = []
-        for col in columns:
-            # Look for AS alias
-            as_match = re.search(r'\bAS\s+([^\s,]+)', col, re.IGNORECASE)
-            if as_match:
-                column_names.append(as_match.group(1).strip())
-            else:
-                # Use the last word (might be column name without AS)
-                parts = col.split()
-                if parts:
-                    # Remove quotes if present
-                    col_name = parts[-1].strip('"\'')
-                    column_names.append(col_name)
-
-        return column_names
-    except Exception as e:
-        logger.warning(f"Error extracting column names: {e}")
-        return []
-
-
-def extract_tool_calls_data(messages: List[Any]) -> tuple[Optional[str], Optional[List[Dict]]]:
-    """Extract SQL query and results from tool calls in agent messages"""
-    sql_query = None
-    query_results = None
-
+    Returns:
+        SQL query string or None if not found
+    """
     for msg in messages:
-        # Check for tool calls in AIMessage
         if hasattr(msg, 'tool_calls') and msg.tool_calls:
             for tool_call in msg.tool_calls:
-                # Extract SQL from sql_db_query tool
                 tool_name = tool_call.get('name', '') or ''
                 if 'sql_db_query' in tool_name.lower():
                     args = tool_call.get('args', {})
                     if 'query' in args:
-                        sql_query = args['query']
+                        return args['query']
+    return None
 
-        # Check for tool results in ToolMessage
-        if hasattr(msg, 'name'):
-            msg_name = getattr(msg, 'name', '') or ''
-            if 'sql_db_query' in msg_name.lower():
-                content = msg.content
 
-                # Log tool message content
-                logger.info(f"Tool message content type: {type(content)}")
-                logger.info(f"Content preview (first 200 chars): {str(content)[:200]}")
+def extract_sql_from_content_fallback(messages: List[Any]) -> Optional[str]:
+    """Extract SQL from message content using regex (fallback method)
 
-                # Try to parse structured data from tool response
-                try:
-                    # Case 1: Content is already a list (structured data)
-                    if isinstance(content, list):
-                        query_results = content
-                        logger.info(f"Parsed as list directly (length: {len(content)})")
-                    # Case 2: Content is a tuple (convert to list)
-                    elif isinstance(content, tuple):
-                        query_results = list(content)
-                        logger.info(f"Converted tuple to list (length: {len(content)})")
-                    # Case 3: Content is JSON string
-                    elif isinstance(content, str):
-                        content_stripped = content.strip()
+    Scans message content in reverse order for SQL SELECT statements.
 
-                        # Try JSON parsing
-                        if content_stripped.startswith('['):
-                            try:
-                                query_results = json.loads(content_stripped)
-                                logger.info(f"Parsed as JSON (length: {len(query_results)}, first row type: {type(query_results[0]).__name__ if query_results else 'N/A'})")
-                            except json.JSONDecodeError as e:
-                                logger.warning(f"JSON parse failed: {e}")
-                                # Try Python literal eval
-                                try:
-                                    import ast
-                                    query_results = ast.literal_eval(content_stripped)
-                                    logger.info(f"Parsed as Python literal (length: {len(query_results)})")
-                                except Exception as e2:
-                                    logger.warning(f"Literal eval failed: {e2}")
-                                    # Keep as string for text-based parsing
-                                    if 'SELECT' not in content.upper():
-                                        query_results = content
-                                        logger.info("Keeping as string (fallback)")
-                        else:
-                            # Plain text format
-                            if 'SELECT' not in content.upper():
-                                query_results = content
-                                logger.info("Keeping as string (plain text)")
-                except Exception as e:
-                    logger.error(f"Unexpected error parsing tool results: {e}")
-                    pass
+    Args:
+        messages: List of agent messages
 
-    # Fallback: extract SQL from message content using regex
-    if not sql_query:
-        for msg in reversed(messages):
-            if hasattr(msg, 'content'):
-                content = str(msg.content)
-                sql_match = re.search(r'(SELECT\s+.+?(?:FROM|;).*?)(?:\n|$)', content, re.IGNORECASE | re.DOTALL)
-                if sql_match:
-                    sql_query = sql_match.group(1).strip()
-                    sql_query = re.sub(r'\s+', ' ', sql_query)
-                    break
+    Returns:
+        Normalized SQL query string or None if not found
+    """
+    for msg in reversed(messages):
+        if hasattr(msg, 'content'):
+            content = str(msg.content)
+            sql_match = re.search(
+                r'(SELECT\s+.+?(?:FROM|;).*?)(?:\n|$)',
+                content,
+                re.IGNORECASE | re.DOTALL
+            )
+            if sql_match:
+                sql_query = sql_match.group(1).strip()
+                # Normalize whitespace
+                sql_query = re.sub(r'\s+', ' ', sql_query)
+                return sql_query
+    return None
 
-    # Validation: Ensure query_results is List[Dict] format
-    # (QuerySQLDatabaseTool now returns JSON with dicts directly)
-    if query_results and isinstance(query_results, list) and len(query_results) > 0:
-        first_row = query_results[0]
-        if not isinstance(first_row, dict):
-            logger.warning(f"Unexpected query result format: expected List[Dict], got List[{type(first_row).__name__}]")
-            # This shouldn't happen with the new QuerySQLDatabaseTool implementation
-            # but we keep this as a safeguard
+
+def extract_sql_from_messages(messages: List[Any]) -> Optional[str]:
+    """Extract SQL query from agent messages (primary + fallback)
+
+    Tries tool_calls first, falls back to content regex extraction.
+
+    Args:
+        messages: List of agent messages
+
+    Returns:
+        SQL query string or None
+    """
+    sql = extract_sql_from_tool_calls(messages)
+    if sql:
+        return sql
+
+    # Fallback to content extraction
+    return extract_sql_from_content_fallback(messages)
+
+
+# ============ Result Extraction Functions ============
+
+def parse_json_string(content: str) -> Optional[List]:
+    """Parse JSON string to list
+
+    Args:
+        content: String content starting with '['
+
+    Returns:
+        Parsed list or None if parsing fails
+    """
+    try:
+        result = json.loads(content)
+        logger.info(f"Parsed as JSON (length: {len(result)}, "
+                   f"first row type: {type(result[0]).__name__ if result else 'N/A'})")
+        return result
+    except json.JSONDecodeError as e:
+        logger.warning(f"JSON parse failed: {e}")
+        return None
+
+
+def parse_literal_string(content: str) -> Optional[List]:
+    """Parse Python literal string (using ast.literal_eval)
+
+    Args:
+        content: String content to parse
+
+    Returns:
+        Parsed list or None if parsing fails
+    """
+    try:
+        import ast
+        result = ast.literal_eval(content)
+        logger.info(f"Parsed as Python literal (length: {len(result)})")
+        return result
+    except Exception as e:
+        logger.warning(f"Literal eval failed: {e}")
+        return None
+
+
+def parse_string_content(content: str) -> Any:
+    """Parse string content (JSON, literal, or plain text)
+
+    Attempts multiple parsing strategies in order of likelihood.
+
+    Args:
+        content: String content from ToolMessage
+
+    Returns:
+        Parsed data (list, str, or None)
+    """
+    content_stripped = content.strip()
+
+    # Strategy 1: JSON parsing
+    if content_stripped.startswith('['):
+        result = parse_json_string(content_stripped)
+        if result is not None:
+            return result
+
+        # Strategy 2: Python literal eval (fallback)
+        result = parse_literal_string(content_stripped)
+        if result is not None:
+            return result
+
+        # Strategy 3: Keep as string if not SQL-related
+        if 'SELECT' not in content.upper():
+            logger.info("Keeping as string (fallback)")
+            return content
+
+    # Strategy 4: Plain text (no SQL)
+    elif 'SELECT' not in content.upper():
+        logger.info("Keeping as string (plain text)")
+        return content
+
+    return None
+
+
+def parse_list_content(content: list) -> List:
+    """Parse list content (already structured)
+
+    Args:
+        content: List content from ToolMessage
+
+    Returns:
+        Original list (no transformation needed)
+    """
+    logger.info(f"Parsed as list directly (length: {len(content)})")
+    return content
+
+
+def parse_tuple_content(content: tuple) -> List:
+    """Parse tuple content (convert to list)
+
+    Args:
+        content: Tuple content from ToolMessage
+
+    Returns:
+        Converted list
+    """
+    result = list(content)
+    logger.info(f"Converted tuple to list (length: {len(result)})")
+    return result
+
+
+def parse_tool_message_content(content: Any) -> Any:
+    """Route content to appropriate parser based on type
+
+    Central dispatcher for different content types.
+
+    Args:
+        content: ToolMessage content (various types)
+
+    Returns:
+        Parsed result (List[Dict], str, or None)
+    """
+    logger.info(f"Tool message content type: {type(content)}")
+    logger.info(f"Content preview (first 200 chars): {str(content)[:200]}")
+
+    if isinstance(content, list):
+        return parse_list_content(content)
+    elif isinstance(content, tuple):
+        return parse_tuple_content(content)
+    elif isinstance(content, str):
+        return parse_string_content(content)
+    else:
+        logger.warning(f"Unexpected content type: {type(content)}")
+        return None
+
+
+# ============ Validation Functions ============
+
+def validate_result_format(query_results: Any) -> bool:
+    """Validate query results are in List[Dict] format
+
+    Checks if results match expected QuerySQLDatabaseTool output format.
+
+    Args:
+        query_results: Parsed query results
+
+    Returns:
+        True if valid format, False otherwise
+    """
+    if not query_results or not isinstance(query_results, list):
+        return False
+
+    if len(query_results) == 0:
+        return True  # Empty results are valid
+
+    first_row = query_results[0]
+    if not isinstance(first_row, dict):
+        logger.warning(
+            f"Unexpected query result format: expected List[Dict], "
+            f"got List[{type(first_row).__name__}]"
+        )
+        return False
+
+    return True
+
+
+def extract_results_from_messages(messages: List[Any]) -> Optional[List[Dict]]:
+    """Extract query results from ToolMessage objects
+
+    Searches for 'sql_db_query' ToolMessages and extracts parsed results.
+
+    Args:
+        messages: List of agent messages
+
+    Returns:
+        Query results as List[Dict] or None if not found
+    """
+    for msg in messages:
+        if not hasattr(msg, 'name'):
+            continue
+
+        msg_name = getattr(msg, 'name', '') or ''
+        if 'sql_db_query' not in msg_name.lower():
+            continue
+
+        try:
+            parsed_result = parse_tool_message_content(msg.content)
+            if parsed_result is None:
+                continue
+
+            # Validate format
+            if validate_result_format(parsed_result):
+                return parsed_result
+            else:
+                # Return anyway but log warning (validation already logged)
+                return parsed_result
+
+        except Exception as e:
+            logger.error(f"Unexpected error parsing tool results: {e}")
+            continue
+
+    return None
+
+
+# ============ Facade Function (Backward Compatibility) ============
+
+def extract_tool_calls_data(messages: List[Any]) -> tuple[Optional[str], Optional[List[Dict]]]:
+    """Extract SQL query and results from tool calls in agent messages
+
+    Facade function maintaining backward compatibility with existing callers.
+    Delegates to specialized extraction functions for SQL and results.
+
+    Args:
+        messages: List of agent messages (AIMessage, ToolMessage, etc.)
+
+    Returns:
+        Tuple of (sql_query, query_results):
+        - sql_query: SQL string or None
+        - query_results: List[Dict] or None
+    """
+    sql_query = extract_sql_from_messages(messages)
+    query_results = extract_results_from_messages(messages)
+
+    if sql_query:
+        logger.info(f"Extracted SQL: {sql_query[:150]}...")
 
     return sql_query, query_results
 

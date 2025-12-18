@@ -182,45 +182,6 @@ class QuerySQLDatabaseTool(BaseTool):
             logger.error(f"Error executing SQL query: {str(e)}")
             return f"Error executing query: {str(e)}\n\nPlease check the SQL syntax and table/column names, then try again."
 
-    def _format_results(self, results: list) -> str:
-        """Format query results as a readable table."""
-        if not results:
-            return ""
-
-        # Handle both dict and tuple results
-        if isinstance(results[0], dict):
-            # Dictionary format
-            headers = list(results[0].keys())
-            rows = [[str(row.get(h, "NULL")) for h in headers] for row in results]
-        elif isinstance(results[0], tuple):
-            # Tuple format - generate column numbers
-            headers = [f"col_{i}" for i in range(len(results[0]))]
-            rows = [[str(val) for val in row] for row in results]
-        else:
-            # Fallback for other types
-            return "\n".join(str(row) for row in results)
-
-        # Calculate column widths
-        col_widths = [len(h) for h in headers]
-        for row in rows:
-            for i, val in enumerate(row):
-                col_widths[i] = max(col_widths[i], len(val))
-
-        # Build table
-        lines = []
-
-        # Header
-        header_line = " | ".join(h.ljust(w) for h, w in zip(headers, col_widths))
-        lines.append(header_line)
-        lines.append("-" * len(header_line))
-
-        # Rows
-        for row in rows:
-            row_line = " | ".join(val.ljust(w) for val, w in zip(row, col_widths))
-            lines.append(row_line)
-
-        return "\n".join(lines)
-
 
 def create_rag_sql_tools(
     rag_service: SchemaRAGService,

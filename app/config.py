@@ -21,14 +21,14 @@ class Settings(BaseSettings):
 
     # Query result limits
     query_limit: int = Field(
-        default=5,
+        default=20,
         description="Maximum number of rows returned from SQL queries",
         validation_alias=AliasChoices("QUERY_LIMIT", "TOP_K")
     )
-    rag_top_k: int = 5
+    rag_top_k: int = 20
 
     # Agent execution limits
-    recursion_limit: int = 15
+    recursion_limit: int = 30
 
     # DeepAgent feature flags
     enable_subagents: bool = True  # Enable subagent delegation
@@ -52,24 +52,6 @@ class Settings(BaseSettings):
         case_sensitive=False,
         extra="ignore",
     )
-
-    @property
-    def top_k(self) -> int:
-        """Deprecated: Use query_limit instead
-
-        This property provides backward compatibility for code using the old parameter name.
-        It will be removed in a future version.
-
-        Returns:
-            The value of query_limit
-        """
-        import warnings
-        warnings.warn(
-            "Settings.top_k is deprecated, use Settings.query_limit instead",
-            DeprecationWarning,
-            stacklevel=2
-        )
-        return self.query_limit
 
     @property
     def dialect(self) -> str:
